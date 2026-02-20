@@ -16,7 +16,7 @@ import os
 import re
 from sys import argv, exit as sys_exit
 from functools import partial
-from typing import Any, Match, Pattern, Dict, Union, Optional, List, Tuple
+from typing import Any, Match, Pattern, Dict, Union, Optional, List, Tuple, cast
 from colorama import init, Fore
 
 
@@ -262,7 +262,7 @@ def replace_variables(
 
 def compile_error_regexes(
 	error_definitions: _ArbitraryDict, global_variables: _VariablesDict
-) -> _ArbitraryDict:
+) -> _ErrorDictionary:
 	"""
 	Compiles regex patterns for each error in the errors dictionary.
 
@@ -273,18 +273,25 @@ def compile_error_regexes(
 	:type global_variables: _VariablesDict
 
 	:return: The `errors` dictionary with compiled regex patterns.
-	:rtype: _ArbitraryDict
+	:rtype: _ErrorDictionary
 	"""
-	result = {}
+	result: _ErrorDictionary = {}
 
 	for error_name, error in error_definitions.items():
 		if error_name == "outside":
-			result[error_name] = compile_error_regexes(error, global_variables)
-		else:
-			result[error_name] = error.copy()
-			result[error_name]["regex"]["pattern"] = sanitize_regex(
-				replace_variables(global_variables, error["regex"])
+			result[error_name] = cast(
+				_ErrorDetails,
+				compile_error_regexes(error, global_variables),
 			)
+		else:
+			error_details = cast(_ErrorDetails, error.copy())
+			raw_regex = error.get("regex")
+			if not isinstance(raw_regex, str):
+				raise TypeError(f"Invalid regex for error '{error_name}'")
+			error_details["regex"] = sanitize_regex(
+				replace_variables(global_variables, raw_regex)
+			)
+			result[error_name] = error_details
 
 	return result
 
@@ -314,11 +321,12 @@ def compile_error_regex_in_file(
 		compiled_errors = compile_error_regexes(errors, global_variables)
 		if "outside" in compiled_errors:
 			outside_errors[error_part] = compiled_errors.pop("outside")
+		error_definitions[error_part] = compiled_errors
 
 	if "outside" in error_definitions:  # Outside errors not related to any part
 		outside_errors[""] = error_definitions.pop("outside")
 
-	return error_definitions, outside_errors
+	return cast(Dict[str, _ErrorDictionary], error_definitions), cast(_OutsideOptions, outside_errors)
 
 
 def extract(
@@ -554,18 +562,13 @@ def match_parts(
 				for token_match_name, match_variable in zip(token_names, match.groups())
 			}
 			if err:  # If error definition exists
-				from re import search as re_search
-
 				for name, error in err.items():  # Static Code Analysis
-					regex = (
-						error["regex"]
-						if isinstance(error["regex"], Pattern)
-						else re.error(error["regex"])
-					)
-					if isinstance(regex, (str, Pattern)):
-						err_match = re_search(regex, match_string)
+					regex = error.get("regex")
+					if not isinstance(regex, Pattern):
+						continue
+					err_match = regex.search(match_string)
 
-					error_message = error["msg"]
+					error_message = error.get("msg")
 					if error_message is None or not isinstance(error_message, str):
 						error_message = ""
 
@@ -669,6 +672,8 @@ def convert_syntax(
 		outside_errors,
 	), pattern_templates = extracted_yaml_details
 	iteration_count = 0
+	if not is_recursive:
+		once_complete.clear()
 
 	if is_recursive:
 		match_rules = {part: match_rules[part] for part in conversion_parts}
@@ -712,10 +717,14 @@ def convert_syntax(
 							) in replacements_tuple:  # pattern-match and replace
 								match = sub(rgx, replacement, match)
 						elif option == "call":
-							calls = opts["call"]
-							match = re_convert(
-								original_content=match, conversion_parts=calls
-							)
+								calls = opts["call"]
+								if isinstance(calls, tuple) and all(
+									isinstance(part_name, str) for part_name in calls
+								):
+									calls_tuple = cast(Tuple[str, ...], calls)
+									match = re_convert(
+										original_content=match, conversion_parts=calls_tuple
+									)
 						elif option == "eachline":  # For eachline option
 							line = opts["eachline"]
 							line_string = str(line)
@@ -956,7 +965,7 @@ if __name__ == "__main__":
 		sys_exit(error_msg + " Insufficient number of arguments")
 
 	try:
-		YAML_DETAILS = None
+		yaml_bundle: Optional[Tuple[_AfterProcessing, _ParseYAMLDetails]] = None
 
 		# Terminal Options-------------------------------------------
 		YES = "-y" in argv  # To run after command automatically
@@ -983,20 +992,22 @@ if __name__ == "__main__":
 			sys_exit("File saved as " + argv[-1])
 		elif "-f" in argv:  # Run compiled ltz
 			argv.remove("-f")
-			YAML_DETAILS = load_compiled_yaml_details(argv[-1])
+			yaml_bundle = load_compiled_yaml_details(argv[-1])
 		elif "-d" in argv:
 			print_yaml_documentation(argv[-1])
 			sys_exit()
 		else:
-			YAML_DETAILS = extract_yaml_details(argv[3], argv[4])
+			yaml_bundle = extract_yaml_details(argv[3], argv[4])
 		# -------------------------------------------------------------------
-		AFTER_COMMAND, YAML_DETAILS = YAML_DETAILS # type: ignore[assignment]
+		if yaml_bundle is None:
+			sys_exit(error_msg + " YAML details not loaded")
+		AFTER_COMMAND, yaml_details = yaml_bundle
 		with open(argv[1], encoding="utf-8") as InputFile:
 			content = InputFile.read()
 		re_convert = partial(
-			convert_syntax, extracted_yaml_details=YAML_DETAILS, is_recursive=True
+			convert_syntax, extracted_yaml_details=yaml_details, is_recursive=True
 		)
-		targetcode = convert_syntax(YAML_DETAILS, content) # type: ignore
+		targetcode = convert_syntax(yaml_details, content)
 		with open(argv[2], "w", encoding="utf-8") as OutputFile:
 			OutputFile.write(targetcode)
 		print(Fore.GREEN, "Saved as", argv[2])
