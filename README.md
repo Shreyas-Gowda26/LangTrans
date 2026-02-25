@@ -37,7 +37,6 @@ Go to [Releases](https://github.com/LangTrans/LangTrans/releases) and download t
 ## Usage
 
 You can use LangTrans from the command line using the following structure:
-**Note:** Python 3.11 is required to run LangTrans.
 
 ```bash
 py langtrans.py <SourceFileName> <OutputFileName> <SyntaxRepr> <PatternRepr>
